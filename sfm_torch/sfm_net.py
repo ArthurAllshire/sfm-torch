@@ -1,11 +1,69 @@
 import torch
 import torch.nn as nn
 
-image_dim = (384, 128)
 base_channels = 32
 
 
-class SFMConvNet(nn.Module):
+class SfM(nn.Module):
+    """SfM-Net from the paper"""
+
+    def __init__(self, image_dim, n_segmentations, intrinsics):
+        """
+        """
+        super(SfM, self).__init__()
+
+        self.image_dim = image_dim
+        self.intrinsics = intrinsics
+        self.structure = Structure(n_segmentations, 3)
+        self.motion = Motion(image_dim, 6, n_segmentations)
+        self.n_segmentations = n_segmentations
+
+        # sets up the parameters from equation (1) of the paper
+        x = torch.arange(self.image_dim[0], dtype=torch.float).repeat(
+            self.image_dim[1], 1
+        ).t()
+        x = self.pinhole_model(x, image_dim[0], self.intrinsics[0])
+        y = torch.arange(self.image_dim[1], dtype=torch.float).repeat(
+            self.image_dim[0], 1
+        )
+        y = self.pinhole_model(y, image_dim[1], self.intrinsics[1])
+        z = torch.ones(self.image_dim[0], self.image_dim[1]) * self.intrinsics[2]
+        self.X = torch.stack([x, y, z]) / self.intrinsics[2]
+
+    def pinhole_model(self, px_idx, px_size, physical_size):
+        """Computes the actual position on the dimension with a pinhole camera model.
+
+        Args:
+            px_idx: position in the dimension in pixels.
+            px_size: size of the dimension in pixels (image width or height).
+            physical_size: physical size of the dimension of the camera chip in {m, cm, ft, etc}.
+        """
+        return px_idx / px_size - physical_size
+
+    def forward(self, image_1, image_2):
+        """Perform a forward pass on the SfM network.
+
+        Args:
+            image_1: image for the current timestep (I_t in the paper).
+            image_2: image for the next timestep (I_t+1 in the paper).
+
+        Returns:
+            Pytorch Tensor representing the flow between the two frames.
+        """
+        batch_size = image_1.size()[0]
+        d_t = self.structure.forward(image_1)
+        # Apply equation 1 from the paper
+        X_t = self.X.repeat(batch_size, 1, 1, 1) * d_t
+
+        masks, R_k, R_c, t_k, t_c, p = self.motion.forward(
+            torch.cat([image_1, image_2], dim=1)
+        )
+
+        # TODO: finish implementation of this function
+        return None
+
+
+class SfMConvNet(nn.Module):
     """ConvNet from the paper.
 
     Used for both the Structure and Motion networks - both have the same
@@ -19,7 +77,7 @@ class SFMConvNet(nn.Module):
     inner_channels = 1024
 
     def __init__(self, input_channels, use_skips=True, ret_embedding=False):
-        super(SFMConvNet, self).__init__()
+        super(SfMConvNet, self).__init__()
 
         self.use_skips = use_skips
         self.ret_embedding = ret_embedding
@@ -97,20 +155,20 @@ class SFMConvNet(nn.Module):
         return x
 
 
-class StructureNet(nn.Module):
+class Structure(nn.Module):
     """Structure Net from the paper."""
 
     min_depth = 1.0
     max_depth = 100.0
 
-    def __init__(self, input_channels):
+    def __init__(self, image_dim, input_channels):
         """
         Args:
             input_channels: number of channels in the input image
         """
-        super(StructureNet, self).__init__()
+        super(Structure, self).__init__()
 
-        self.conv_net = SFMConvNet(input_channels, use_skips=True, ret_embedding=False)
+        self.conv_net = SfMConvNet(input_channels, use_skips=True, ret_embedding=False)
         # 1x1 convolution (equivalent to a FC neural network applied pixelwise
         # with channels as inputs)
         self.conv_output = nn.Conv2d(base_channels, 1, 1)
@@ -138,7 +196,7 @@ class StructureNet(nn.Module):
         return x
 
 
-class MotionNet(nn.Module):
+class Motion(nn.Module):
     """Motion Net from the paper."""
 
     # size of the fully connected layer on the ouput of the emdedding
@@ -148,19 +206,19 @@ class MotionNet(nn.Module):
     t_params = 3
     p_c_params = 3
 
-    def __init__(self, input_channels, n_segmentations):
+    def __init__(self, image_dim, input_channels, n_segmentations):
         """
-        Initialize the MotionNet.
+        Initialize the Motion.
 
         Args:
             input_channels: combined number of channels in the pair of input images.
             n_segmentaitons: number of segmentation masks to predict (K in the paper).
         """
-        super(MotionNet, self).__init__()
+        super(Motion, self).__init__()
 
         self.n_segmentations = n_segmentations
 
-        self.conv_net = SFMConvNet(input_channels, use_skips=True, ret_embedding=True)
+        self.conv_net = SfMConvNet(input_channels, use_skips=True, ret_embedding=True)
 
         # 1x1 convolution to produce the segmentations
         self.conv_output = nn.Conv2d(base_channels, n_segmentations, 1)

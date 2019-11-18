@@ -1,9 +1,11 @@
 from sfm_torch import sfm_net
+import numpy as np
 import torch
+import itertools
 
 
 def test_conv_net_shapes():
-    net = sfm_net.SFMConvNet(6, ret_embedding=True)
+    net = sfm_net.SfMConvNet(6, ret_embedding=True)
     # batch, channels, h, w
     image = torch.randn(4, 6, 384, 128)
     out, conv = net(image)
@@ -12,33 +14,58 @@ def test_conv_net_shapes():
         32,
         384,
         128,
-    ), "SFM Conv net primary output shape does not match"
+    ), "SfM Conv net primary output shape does not match"
     assert conv.size() == (
         4,
         1024,
         12,
         4,
-    ), "SFM Conv net conv output shape does not match"
+    ), "SfM Conv net conv output shape does not match"
 
 
 def test_structure_net_shapes():
-    net = sfm_net.StructureNet(3)
+    image_dim = (384 * 2, 128 * 2)
+    net = sfm_net.Structure(image_dim, 3)
 
-    image = torch.randn(2, 3, 384 * 2, 128 * 2)
+    image = torch.randn(2, 3, image_dim[0], image_dim[1])
     out = net(image)
-    assert out.size() == (2, 1, 384 * 2, 128 * 2)
+    assert out.size() == (2, 1, image_dim[0], image_dim[1])
 
 
 def test_motion_net_shapes():
-    net = sfm_net.MotionNet(6, 10)
-    image = torch.randn(2, 6, 384, 128)
+    image_dim = (384, 128)
+    net = sfm_net.Motion(image_dim, 6, 10)
+    image = torch.randn(2, 6, image_dim[0], image_dim[1])
 
     masks, R_k, R_c, t_k, t_c, p = net.forward(image)
     masks, R_k, t_k, R_c, t_c, p = net.forward(image)
 
-    assert masks.size() == (2, 10, 384, 128)
+    assert masks.size() == (2, 10, image_dim[0], image_dim[1])
     assert R_k.size() == (2, 10 * 3)
     assert t_k.size() == (2, 10 * 3)
     assert R_c.size() == (2, 1 * 3)
     assert t_c.size() == (2, 1 * 3)
     assert p.size() == (2, 3 * 1)
+
+
+def test_sfm_shapes():
+    image_dim = (384, 128)
+    intrinsics = (0.5, 0.5, 1.0)
+
+    def pinhole_x(x):
+        return (x / image_dim[0] - intrinsics[0]) / intrinsics[2]
+
+    def pinhole_y(y):
+        return (y / image_dim[1] - intrinsics[1]) / intrinsics[2]
+
+    net = sfm_net.SfM(image_dim, 3, intrinsics)
+    assert net.X.shape == (3, image_dim[0], image_dim[1])
+
+    # test pinhole camera model
+    for x, y in itertools.product([0, image_dim[0] - 1], [0, image_dim[1] - 1]):
+        assert np.isclose(net.X[0][x][y], pinhole_x(x))
+        assert np.isclose(net.X[1][x][y], pinhole_y(y))
+
+    image_1 = torch.randn(2, 3, image_dim[0], image_dim[1])
+    image_2 = torch.randn(2, 3, image_dim[0], image_dim[1])
+    net.forward(image_1, image_2)
