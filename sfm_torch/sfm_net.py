@@ -1,7 +1,5 @@
 import torch
-
 import torch.nn as nn
-import torch.nn.functional as F
 
 image_dim = (384, 128)
 base_channels = 32
@@ -76,7 +74,7 @@ class SFMConvNet(nn.Module):
         """
         skips = []
         for i, layer in enumerate(self.conv):
-            x = F.relu(layer(x))
+            x = torch.relu(layer(x))
             # store intermediate representations to use in skip connections later
             # only store every second layer (before dimenson reduction from stride 2)
             # and don't store the last layer
@@ -98,6 +96,9 @@ class SFMConvNet(nn.Module):
 
 class StructureNet(nn.Module):
     """Structure Net from the paper."""
+
+    min_depth = 1.0
+    max_depth = 100.0
 
     def __init__(self, input_channels):
         """
@@ -127,16 +128,22 @@ class StructureNet(nn.Module):
         through the pinhole camera model to convert to point cloud.
         """
         x = self.conv_net(x)
-        x = self.conv_output(x)
+        # relu + depth bias of 1 as noted in the paper to prevent small/negative depth values
+        x = torch.relu(self.conv_output(x)) + self.min_depth
+        # clamp x to be less than 100
+        x = torch.clamp(x, max=self.max_depth)
         return x
 
 
 class MotionNet(nn.Module):
     """Motion Net from the paper."""
 
-    n_fc_layers = 2
+    # size of the fully connected layer on the ouput of the emdedding
     fc_dim = 512
-    motion_representation_parameters = 9
+    # dimensions
+    R_params = 3
+    t_params = 3
+    p_c_params = 3
 
     def __init__(self, input_channels, n_segmentations):
         """
@@ -148,6 +155,8 @@ class MotionNet(nn.Module):
         """
         super(MotionNet, self).__init__()
 
+        self.n_segmentations = n_segmentations
+
         self.conv_net = SFMConvNet(input_channels, use_skips=True, ret_embedding=True)
 
         # 1x1 convolution to produce the segmentations
@@ -155,27 +164,59 @@ class MotionNet(nn.Module):
 
         # TODO: finish implementation of motion and object prediction
         inner_c = self.conv_net.inner_channels
-        linear_input_dim = int(inner_c*image_dim[0]*image_dim[1]/(inner_c/base_channels)**2)
+        self.linear_input_dim = int(
+            inner_c * image_dim[0] * image_dim[1] / (inner_c / base_channels) ** 2
+        )
+
+        self.R_sz = self.R_params * (self.n_segmentations + 1)
+        self.t_sz = self.t_params * (self.n_segmentations + 1)
+
+        self.linear_output_dim = self.R_sz + self.t_sz + self.p_c_params
 
         self.fc = torch.nn.Sequential(
-            nn.Linear(
-                linear_input_dim, self.fc_dim
-            ),
+            nn.Flatten(),
+            nn.Linear(self.linear_input_dim, self.fc_dim),
             nn.ReLU(),
-            nn.Linear(
-                self.fc_dim,
-                self.motion_representation_parameters * (n_segmentations + 1),
-            ),
+            nn.Linear(self.fc_dim, self.linear_output_dim,),
         )
 
     def forward(self, x):
         """Perform a forward past on the Motion Network.
 
         Args:
-            x: Pytorch Tensor with shape (batch_size, n_channels, width, height)
+            x: Pytorch Tensor with shape (batch_size, n_channels, width, height),
+            representing the concatenated input images.
         Returns:
-            Pytorch Tensor representing the output of the motion network.
-            This tensor has shape (batch_size, n_segmentations, width, height).
+            List of tensors containing:
+            The segmentation masks (batch_sz, n_masks, width, height)
+            Rotation of each segmentation mask, R_k, shape (batch_sz, n_masks*3)
+            Translation of each segmentation mask, t_c, shape (batch_sz, n_masks*3)
+            Rotation of the camera, R_c, shape (batch_sz, 3)
+            Translation of the camera, t_c, shape (batch_sz, 3)
+            The pivot points of the camera rotation, t_c, shape (batch_sz, 3)
         """
-        x, embedding = self.conv_net(x)
-        x = self.conv_output(x)
+
+        masks, embedding = self.conv_net(x)
+        masks = self.conv_output(masks)
+        masks = torch.sigmoid(masks)
+
+        batch_size = masks.size()[0]
+        motion_output = self.fc(embedding).view(self.linear_output_dim, -1)
+        # R and t pack together the R and t information for both the n_segmentations masks
+        # as well as for the camera
+        R = torch.tanh(motion_output[0 : self.R_sz])
+        t = torch.sigmoid(motion_output[self.R_sz : self.R_sz + self.t_sz])
+        p_c = torch.sigmoid(
+            motion_output[
+                self.R_sz + self.t_sz : self.R_sz + self.t_sz + self.p_c_params
+            ]
+        )
+        motion = [
+            R[0 : self.R_sz - self.R_params],
+            t[0 : self.t_sz - self.t_params],
+            R[self.R_sz - self.R_params : self.R_sz],
+            t[self.t_sz - self.t_params : self.t_sz],
+            p_c,
+        ]
+        motion = [r.view(batch_size, -1) for r in motion]
+        return [masks] + motion

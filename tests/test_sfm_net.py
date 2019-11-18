@@ -28,8 +28,17 @@ def test_structure_net_shapes():
     out = net(image)
     assert out.size() == (2, 1, 384 * 2, 128 * 2)
 
+
 def test_motion_net_shapes():
     net = sfm_net.MotionNet(6, 10)
-
     image = torch.randn(2, 6, 384, 128)
 
+    masks, R_k, R_c, t_k, t_c, p = net.forward(image)
+    masks, R_k, t_k, R_c, t_c, p = net.forward(image)
+
+    assert masks.size() == (2, 10, 384, 128)
+    assert R_k.size() == (2, 10 * 3)
+    assert t_k.size() == (2, 10 * 3)
+    assert R_c.size() == (2, 1 * 3)
+    assert t_c.size() == (2, 1 * 3)
+    assert p.size() == (2, 3 * 1)
