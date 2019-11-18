@@ -30,8 +30,6 @@ class SFMConvNet(nn.Module):
         ]
         strides_per_layer = [1 if i % 2 == 0 else 2 for i in range(self.n_conv_layers)]
 
-        # TODO: Add batch norm
-
         self.conv = [
             nn.Conv2d(
                 channels_conv_layers[i],
@@ -40,6 +38,10 @@ class SFMConvNet(nn.Module):
                 padding=1,
                 stride=strides_per_layer[i],
             )
+            for i in range(self.n_conv_layers)
+        ]
+        self.batch_norm = [
+            nn.BatchNorm2d(channels_conv_layers[i + 1])
             for i in range(self.n_conv_layers)
         ]
 
@@ -75,6 +77,7 @@ class SFMConvNet(nn.Module):
         skips = []
         for i, layer in enumerate(self.conv):
             x = torch.relu(layer(x))
+            x = self.batch_norm[i](x)
             # store intermediate representations to use in skip connections later
             # only store every second layer (before dimenson reduction from stride 2)
             # and don't store the last layer
