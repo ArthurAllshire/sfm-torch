@@ -37,15 +37,15 @@ def test_motion_net_shapes():
     net = sfm_net.Motion(image_dim, 6, 10)
     image = torch.randn(2, 6, image_dim[0], image_dim[1])
 
-    masks, R_k, R_c, t_k, t_c, p = net.forward(image)
-    masks, R_k, t_k, R_c, t_c, p = net.forward(image)
+    masks, rot_k, t_k, p_k, rot_c, t_c, p_c = net.forward(image)
 
     assert masks.size() == (2, 10, image_dim[0], image_dim[1])
-    assert R_k.size() == (2, 10 * 3)
+    assert rot_k.size() == (2, 10 * 3)
     assert t_k.size() == (2, 10 * 3)
-    assert R_c.size() == (2, 1 * 3)
+    assert p_k.size() == (2, 10 * 3)
+    assert rot_c.size() == (2, 1 * 3)
     assert t_c.size() == (2, 1 * 3)
-    assert p.size() == (2, 3 * 1)
+    assert p_c.size() == (2, 1 * 3)
 
 
 def test_sfm_shapes():

@@ -9,6 +9,7 @@ class SfM(nn.Module):
 
     def __init__(self, image_dim, n_segmentations, intrinsics):
         """
+        TODO docstring!
         """
         super(SfM, self).__init__()
 
@@ -19,9 +20,11 @@ class SfM(nn.Module):
         self.n_segmentations = n_segmentations
 
         # sets up the parameters from equation (1) of the paper
-        x = torch.arange(self.image_dim[0], dtype=torch.float).repeat(
-            self.image_dim[1], 1
-        ).t()
+        x = (
+            torch.arange(self.image_dim[0], dtype=torch.float)
+            .repeat(self.image_dim[1], 1)
+            .t()
+        )
         x = self.pinhole_model(x, image_dim[0], self.intrinsics[0])
         y = torch.arange(self.image_dim[1], dtype=torch.float).repeat(
             self.image_dim[0], 1
@@ -37,8 +40,52 @@ class SfM(nn.Module):
             px_idx: position in the dimension in pixels.
             px_size: size of the dimension in pixels (image width or height).
             physical_size: physical size of the dimension of the camera chip in {m, cm, ft, etc}.
+        Returns:
+            The position along the dimension (from equation 1 in the SfM paper).
         """
         return px_idx / px_size - physical_size
+
+    def rotation_tensor(self, sin_alpha, sin_beta, sin_gamma):
+        """Computes the rotation tensor representing the rotation matrices
+        for each object for a batch of images.
+
+        Args:
+            sin_alpha: sin of the alpha euler angle as predicted by the network.
+            sin_beta: sin of the alpha euler angle as predicted by the network.
+            sin_gamma: sin of the alpha euler angle as predicted by the network.
+        Returns:
+            tensor packing together the rotation matrices for each mask in each
+            batch, shape (batch_size, n_masks, 3, 3)
+        """
+        in_sz = sin_alpha.size()
+        [cos_alpha, cos_beta, cos_gamma] = [
+            torch.cos(torch.asin(s)) for s in [sin_alpha, sin_beta, sin_gamma]
+        ]
+
+        def zero():
+            return torch.zeros(in_sz)
+
+        def one():
+            return torch.zeros(in_sz)
+
+        # Yuck! Is there a cleaner way of doing this?
+        R_alpha = torch.empty((3, 3) + sin_alpha.size())
+        R_alpha[0] = torch.stack([cos_alpha, -sin_alpha, zero()])
+        R_alpha[1] = torch.stack([sin_alpha, cos_alpha, zero()])
+        R_alpha[2] = torch.stack([zero(), zero(), one()])
+        R_beta = torch.empty((3, 3) + sin_alpha.size())
+        R_beta[0] = torch.stack([cos_beta, zero(), sin_beta])
+        R_beta[1] = torch.stack([zero(), one(), zero()])
+        R_beta[2] = torch.stack([-sin_beta, zero(), cos_beta])
+        R_gamma = torch.empty((3, 3) + sin_alpha.size())
+        R_gamma[0] = torch.stack([one(), zero(), zero()])
+        R_gamma[1] = torch.stack([zero(), cos_gamma, -sin_gamma])
+        R_gamma[2] = torch.stack([zero(), sin_gamma, cos_gamma])
+        [R_alpha, R_beta, R_gamma] = [
+            m.view(in_sz[0], -1, 3, 3) for m in [R_alpha, R_beta, R_gamma]
+        ]
+        R = torch.matmul(torch.matmul(R_alpha, R_beta), R_gamma)
+        return R
 
     def forward(self, image_1, image_2):
         """Perform a forward pass on the SfM network.
@@ -53,11 +100,18 @@ class SfM(nn.Module):
         batch_size = image_1.size()[0]
         d_t = self.structure.forward(image_1)
         # Apply equation 1 from the paper
-        X_t = self.X.repeat(batch_size, 1, 1, 1) * d_t
+        X = self.X.repeat(batch_size, 1, 1, 1) * d_t
 
-        masks, R_k, R_c, t_k, t_c, p = self.motion.forward(
+        masks, rot_k, t_k, p_k, rot_c, t_c, p_c = self.motion.forward(
             torch.cat([image_1, image_2], dim=1)
         )
+        R_k = self.rotation_tensor(
+            *[
+                rot_k[:, i * self.n_segmentations : (i + 1) * self.n_segmentations]
+                for i in range(3)
+            ]
+        )
+        R_c = self.rotation_tensor(*[rot_c[:, i : i + 1] for i in range(3)])
 
         # TODO: finish implementation of this function
         return None
@@ -202,9 +256,9 @@ class Motion(nn.Module):
     # size of the fully connected layer on the ouput of the emdedding
     fc_dim = 512
     # dimensions
-    R_params = 3
-    t_params = 3
-    p_c_params = 3
+    R_dim = 3
+    t_dim = 3
+    p_dim = 3
 
     def __init__(self, image_dim, input_channels, n_segmentations):
         """
@@ -229,10 +283,11 @@ class Motion(nn.Module):
             inner_c * image_dim[0] * image_dim[1] / (inner_c / base_channels) ** 2
         )
 
-        self.R_sz = self.R_params * (self.n_segmentations + 1)
-        self.t_sz = self.t_params * (self.n_segmentations + 1)
-
-        self.linear_output_dim = self.R_sz + self.t_sz + self.p_c_params
+        self.R_sz = self.R_dim * (self.n_segmentations + 1)
+        self.t_sz = self.t_dim * (self.n_segmentations + 1)
+        self.p_sz = self.p_dim * (self.n_segmentations + 1)
+        # one extra for the camera parameters
+        self.linear_output_dim = self.R_sz + self.t_sz + self.p_sz
 
         self.fc = torch.nn.Sequential(
             nn.Flatten(),
@@ -250,10 +305,14 @@ class Motion(nn.Module):
         Returns:
             List of tensors containing:
             The segmentation masks (batch_sz, n_masks, width, height)
-            Rotation of each segmentation mask, R_k, shape (batch_sz, n_masks*3)
+            Rotation of each segmentation mask, sin(alpha), sin(beta), sin(gamma),
+            packed togother in that order, shape (batch_sz, n_masks*3)
             Translation of each segmentation mask, t_c, shape (batch_sz, n_masks*3)
             Rotation of the camera, R_c, shape (batch_sz, 3)
+            Rotation of the camera, sin(alpha), sin(beta), sin(gamma), in that order,
+            shape (batch_sz, 3)
             Translation of the camera, t_c, shape (batch_sz, 3)
+            The pivot points of the masks' rotation, t_m, shape (batch_sz, n_masks*3)
             The pivot points of the camera rotation, t_c, shape (batch_sz, 3)
         """
 
@@ -263,21 +322,20 @@ class Motion(nn.Module):
 
         batch_size = masks.size()[0]
         motion_output = self.fc(embedding).view(self.linear_output_dim, -1)
-        # R and t pack together the R and t information for both the n_segmentations masks
+        # R and t pack together the R, t, and p information for both the n_segmentations masks
         # as well as for the camera
         R = torch.tanh(motion_output[0 : self.R_sz])
         t = torch.sigmoid(motion_output[self.R_sz : self.R_sz + self.t_sz])
-        p_c = torch.sigmoid(
-            motion_output[
-                self.R_sz + self.t_sz : self.R_sz + self.t_sz + self.p_c_params
-            ]
+        p = torch.sigmoid(
+            motion_output[self.R_sz + self.t_sz : self.R_sz + self.t_sz + self.p_sz]
         )
         motion = [
-            R[0 : self.R_sz - self.R_params],
-            t[0 : self.t_sz - self.t_params],
-            R[self.R_sz - self.R_params : self.R_sz],
-            t[self.t_sz - self.t_params : self.t_sz],
-            p_c,
+            R[: -self.R_dim],
+            t[: -self.t_dim],
+            p[: -self.p_dim],
+            R[-self.R_dim :],
+            t[-self.t_dim :],
+            p[-self.p_dim :],
         ]
         motion = [r.view(batch_size, -1) for r in motion]
         return [masks] + motion
