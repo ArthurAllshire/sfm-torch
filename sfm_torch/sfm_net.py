@@ -9,7 +9,12 @@ class SfM(nn.Module):
 
     def __init__(self, image_dim, n_segmentations, intrinsics):
         """
-        TODO docstring!
+        Initialize the SfM prediction network.
+
+        Args:
+            image_dim: tuple representing the (width, height) of the input image.
+            n_segmentations: number of masks to predict.
+            intrinsics: tuple of the camera intrinsics for the pinhole model, (c_x, c_y, f_l)
         """
         super(SfM, self).__init__()
 
@@ -111,9 +116,36 @@ class SfM(nn.Module):
                 for i in range(3)
             ]
         )
+
         R_c = self.rotation_tensor(*[rot_c[:, i : i + 1] for i in range(3)])
 
+        X_prime = X.clone()
+        X_sz = X.size()
+        batch_add_sz = (*self.image_dim, batch_size, 3)
+        batch_mm_sz = (*self.image_dim, batch_size, 3, 1)
+        mask_mul_sz = (3, batch_size, *self.image_dim)
+
+        def transformation(X, R, p, t):
+            return (
+                torch.matmul(R, (X.view(batch_add_sz) - p).view(batch_mm_sz)).view(
+                    batch_add_sz
+                )
+                + t
+            ).view(X_sz)
+
+        # TODO: investigate packing this together into matrix ops
+        for k in range(self.n_segmentations):
+            # select the relevant components of p and t for this mask's transformation
+            p = p_k[:, k * 3 : (k + 1) * 3]
+            t = t_k[:, k * 3 : (k + 1) * 3]
+            mask_mul = transformation(X, R_k[:, k], p, t)
+            X_prime += (masks[:, k] * mask_mul.view(mask_mul_sz)).view(X_sz)
+
+        # TODO: do we want to copy X_prime here?
+        X_2prime = transformation(X_prime, R_c[:, 0], p_c, t_c)
+
         # TODO: finish implementation of this function
+
         return None
 
 
