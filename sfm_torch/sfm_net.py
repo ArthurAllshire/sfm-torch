@@ -19,7 +19,9 @@ class SfM(nn.Module):
         super(SfM, self).__init__()
 
         self.image_dim = image_dim
+        self.image_dim_t = torch.tensor(image_dim)
         self.intrinsics = intrinsics
+        self.intrinsics_t = torch.tensor(intrinsics)
         self.structure = Structure(n_segmentations, 3)
         self.motion = Motion(image_dim, 6, n_segmentations)
         self.n_segmentations = n_segmentations
@@ -100,7 +102,12 @@ class SfM(nn.Module):
             image_2: image for the next timestep (I_t+1 in the paper).
 
         Returns:
-            Pytorch Tensor representing the flow between the two frames.
+            The per-pixel (x, y) flow between the two frames, a tensor of shape
+            (batch_size, 2, width, height)
+            The predicted depth of each pixel image_1, a tensor of shape
+            (batch_size, 1, width, height)
+            The object masks used to predict the motion, a tensor of shape
+            (batch_size, n_segmentations, width, height)
         """
         batch_size = image_1.size()[0]
         d_t = self.structure.forward(image_1)
@@ -141,12 +148,17 @@ class SfM(nn.Module):
             mask_mul = transformation(X, R_k[:, k], p, t)
             X_prime += (masks[:, k] * mask_mul.view(mask_mul_sz)).view(X_sz)
 
-        # TODO: do we want to copy X_prime here?
         X_2prime = transformation(X_prime, R_c[:, 0], p_c, t_c)
 
-        # TODO: finish implementation of this function
+        projected = (self.intrinsics[2] / X_2prime[:, 2]) * X_2prime[:, 0:2]
+        projected = (
+            (projected.view(batch_size, *self.image_dim, 2) - self.intrinsics_t[0:2])
+            * self.image_dim_t
+        ).view(projected.size())
 
-        return None
+        flow = X[:, 0:2] - projected
+
+        return flow, d_t, masks
 
 
 class SfMConvNet(nn.Module):

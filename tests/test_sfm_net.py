@@ -58,7 +58,8 @@ def test_sfm_shapes():
     def pinhole_y(y):
         return (y / image_dim[1] - intrinsics[1]) / intrinsics[2]
 
-    net = sfm_net.SfM(image_dim, 3, intrinsics)
+    n_segmentations = 3
+    net = sfm_net.SfM(image_dim, n_segmentations, intrinsics)
     assert net.X.shape == (3, image_dim[0], image_dim[1])
 
     # test pinhole camera model
@@ -66,6 +67,11 @@ def test_sfm_shapes():
         assert np.isclose(net.X[0][x][y], pinhole_x(x))
         assert np.isclose(net.X[1][x][y], pinhole_y(y))
 
-    image_1 = torch.randn(2, 3, image_dim[0], image_dim[1])
-    image_2 = torch.randn(2, 3, image_dim[0], image_dim[1])
-    net.forward(image_1, image_2)
+    batch = 2
+    image_1 = torch.randn(batch, 3, image_dim[0], image_dim[1])
+    image_2 = torch.randn(batch, 3, image_dim[0], image_dim[1])
+    flow, depth, masks = net.forward(image_1, image_2)
+
+    assert flow.shape == (batch, 2, *image_dim)
+    assert depth.shape == (batch, 1, *image_dim)
+    assert masks.shape == (batch, n_segmentations, *image_dim)
