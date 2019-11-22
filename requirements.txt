@@ -2,3 +2,6 @@ torch
 torchvision
 pytest
 numpy
+pykitti
+# needed for pykitti at the moment...
+opencv-python
